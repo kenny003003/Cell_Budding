@@ -43,9 +43,10 @@ class BlebParams:
     compress: float = 0.90      # cavity radius = compress * seeded packing radius
     # the local defect ------------------------------------------------------
     defect_dir: tuple = (1.0, 0.0, 0.0)   # direction of the weak patch
-    defect_halfangle: float = 0.9          # cone half-angle [rad] (~52 deg)
+    defect_halfangle: float = 0.45         # cone half-angle [rad] (~26 deg, small hole)
     defect_depth: float = 1.0              # 1 = stiffness -> 0 at the patch centre
     defect_open_t: float = 16.0            # [h] open the defect after this time
+    div_bias: float = 1.6                  # outward bias of division axis (finger growth)
     # cell-cell mechanics ---------------------------------------------------
     relax_frac: float = 0.30    # fraction of overlap/penetration resolved per sweep
     k_coh: float = 0.08         # cohesion (surface tension) relative to repulsion
@@ -104,7 +105,8 @@ class BlebSpheroid:
             return np.ones(u.shape[0])
         cosang = u @ self.n_hat
         c0 = np.cos(bp.defect_halfangle)
-        t = np.clip((cosang - c0) / 0.12, 0.0, 1.0)   # sharp edge: 0 outside, 1 inside cone
+        edge = max(0.03, 0.4 * (1.0 - c0))            # edge width scales with cone size
+        t = np.clip((cosang - c0) / edge, 0.0, 1.0)   # 0 outside cone -> 1 toward axis
         return 1.0 - bp.defect_depth * t
 
     def _bulk_overpack(self):
@@ -168,11 +170,20 @@ class BlebSpheroid:
         if idx.size == 0:
             return
         new_pos, new_nn, keep = [], [], self.n_n.copy()
+        center = self.pos.mean(0)
         for i in idx:
             if self.pos.shape[0] + len(new_pos) >= bp.n_max:
                 break
-            dvec = self.rng.normal(size=3); dvec /= np.linalg.norm(dvec) + 1e-12
-            off = 0.5 * self.r[i] * dvec
+            # divide preferentially toward free space (radially outward): under
+            # confinement the daughter is pushed where resistance is least, so a
+            # cell extruding through the defect extends the bud as a finger.
+            rad = self.pos[i] - center
+            nr = np.linalg.norm(rad)
+            rad = rad / nr if nr > 1e-6 else self.rng.normal(size=3)
+            dvec = self.rng.normal(size=3)
+            axis = dvec / (np.linalg.norm(dvec) + 1e-12) + bp.div_bias * rad
+            axis /= np.linalg.norm(axis) + 1e-12
+            off = 0.5 * self.r[i] * axis
             self.pos[i] = self.pos[i] + off
             new_pos.append(self.pos[i] - 2 * off)
             keep[i] = self.n_n[i] / 2.0; new_nn.append(self.n_n[i] / 2.0)
