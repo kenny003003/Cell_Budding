@@ -188,6 +188,25 @@ trend (`validate.py` checks it; 4/4 pass):
 > set; only `E_ECM` changes between conditions. See `src/spheroid_model.py` for
 > the full derivation and assumptions.
 
+## Local ECM defect → budding
+
+`src/spheroid_bleb.py` is an exploratory extension (not in the paper) enabled by
+making the confinement **spatially resolved** instead of mean-field. A growing
+spheroid is held in a matrix cavity, then a **local defect** — an angular patch
+where the confining stiffness drops to ~0 (a hole in the ECM) — is opened. With
+the wall gone there, the internal pressure is unbalanced, so cells are extruded
+through the defect; and because they feel no confinement, they pass the volume
+checkpoint and keep proliferating, extending a **bud** while the confined bulk
+stays arrested. Cohesion (surface tension) keeps the bud a connected protrusion.
+
+![Budding through an ECM defect](figures/spheroid_bleb.gif)
+
+The bulk (bright, σ_g ≈ 320 Pa, arrested, compressed cells) and the unconfined
+bud (dark, σ_g ≈ 0, full-size proliferating cells) separate cleanly. This uses a
+genuine force-based cell model (repulsion + cohesion + a defective boundary) and
+a sharper tissue-scale sizing checkpoint; it is an illustration of the mechanism,
+not a calibrated result.
+
 ## Usage
 
 ```bash
@@ -197,6 +216,7 @@ python src/figure1.py             # writes figures/ (Fig. 1b–f + combined)
 python src/spheroid_model.py      # prints the ECM-stiffness growth sweep
 python src/figure4.py             # writes figures/figure4_spheroid.png
 python src/animate_spheroid.py    # writes figures/spheroid_growth.gif
+python src/spheroid_bleb.py       # writes figures/spheroid_bleb.gif (ECM-defect bud)
 python src/validate.py            # checks both reproductions (11/11)
 ```
 
@@ -220,6 +240,7 @@ src/figure1.py             reproduces Figure 1b–f
 src/spheroid_model.py      simplified open multicellular spheroid model (≈Fig. 4)
 src/figure4.py             reproduces the stress-dependent-growth figure
 src/animate_spheroid.py    renders the spheroid-growth movie (GIF)
+src/spheroid_bleb.py       local-ECM-defect budding model + movie (extension)
 src/validate.py            quantitative checks for both models (11/11)
-figures/                   generated figures and animation
+figures/                   generated figures and animations
 ```
