@@ -99,18 +99,24 @@ def main():
     c.legend(frameon=False, fontsize=9)
     c.spines[["top", "right"]].set_visible(False)
 
-    # (d) snapshot of the stiffest spheroid, cells coloured by stress -------
+    # (d) snapshot of the stiffest spheroid, true-to-scale cells -----------
+    from matplotlib.collections import EllipseCollection
     d = ax[1, 1]
     s = res["1.1 kPa"]
     pos, sg, r = s.pos, s.sigma_g, s.r
-    order = np.argsort(pos[:, 2])                    # draw back-to-front
-    sc = d.scatter(pos[order, 0], pos[order, 1],
-                   s=90 * (r[order] / r.mean()) ** 2,
-                   c=sg[order], cmap="inferno", edgecolors="k", linewidths=0.3)
+    order = np.argsort(pos[:, 2])                    # back-to-front
+    ec = EllipseCollection(widths=2 * r[order], heights=2 * r[order], angles=0,
+                           units="xy", offsets=pos[order, :2],
+                           transOffset=d.transData, cmap="inferno",
+                           edgecolors="k", linewidths=0.3)
+    ec.set_array(sg[order])
+    d.add_collection(ec)
+    L = 1.05 * (np.linalg.norm(pos[:, :2], axis=1) + r).max()
+    d.set_xlim(-L, L); d.set_ylim(-L, L)
     d.set_aspect("equal")
     d.set_xlabel("x [µm]"); d.set_ylabel("y [µm]")
     d.set_title("(d) 1.1 kPa spheroid: core more compressed")
-    cb = fig.colorbar(sc, ax=d, shrink=0.85)
+    cb = fig.colorbar(ec, ax=d, shrink=0.85)
     cb.set_label(r"$\sigma_g$ [Pa]")
 
     fig.tight_layout(rect=[0, 0, 1, 0.95])
