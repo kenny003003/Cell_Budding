@@ -23,6 +23,57 @@ def _check(name, ok, detail):
     return ok
 
 
+def validate_spheroid():
+    """Checks for the simplified open multicellular spheroid model (~Fig. 4):
+    stiffer ECM suppresses growth, raises confinement stress, and holds core
+    cells below the mitotic checkpoint."""
+    import dataclasses
+    import spheroid_model as spm
+
+    print("\nValidation of the simplified open spheroid model (~Fig. 4)\n")
+    # slightly reduced settings keep the check fast; the trend is unchanged
+    sp = dataclasses.replace(spm.SpheroidParams(), relax_iters=3, t_max=260.0)
+    table = spm.VolumeTable(sp.cell)
+    E = {"free": 0.0, "soft": 580.0, "stiff": 1100.0}
+    sph = {}
+    for k, e in E.items():
+        s = spm.Spheroid(e, sp, table)
+        s.run()
+        sph[k] = s
+
+    ok = []
+    Nf = sph["free"].series()["N"][-1]
+    Ns = sph["soft"].series()["N"][-1]
+    Nh = sph["stiff"].series()["N"][-1]
+    ok.append(_check("stiffer ECM -> fewer cells (monotonic)",
+                     Nf > Ns > Nh,
+                     f"N: free={Nf} > soft(0.58kPa)={Ns} > stiff(1.1kPa)={Nh}"))
+
+    sig_s = float(sph["soft"].sigma_g.mean())
+    sig_h = float(sph["stiff"].sigma_g.mean())
+    ok.append(_check("confinement builds compressive stress",
+                     sig_h > sig_s > 0.0,
+                     f"<sigma_g>: stiff={sig_h:.0f} > soft={sig_s:.0f} > 0 Pa"))
+
+    free_fold = (sph["free"].series()["V_total"][-1] / sph["free"].V0_total)
+    stiff_fold = (sph["stiff"].series()["V_total"][-1] / sph["stiff"].V0_total)
+    ok.append(_check("stiff ECM arrests growth well below unconfined",
+                     stiff_fold < 0.5 * free_fold,
+                     f"fold-growth stiff x{stiff_fold:.1f} << free x{free_fold:.1f}"))
+
+    # spatial variation: core cells more compressed than rim cells
+    s = sph["stiff"]
+    rho = np.linalg.norm(s.pos - s.pos.mean(axis=0), axis=1)
+    inner = s.sigma_g[rho < np.median(rho)].mean()
+    outer = s.sigma_g[rho >= np.median(rho)].mean()
+    ok.append(_check("core cells more compressed than rim (spatial variation)",
+                     inner > outer,
+                     f"<sigma_g> core={inner:.0f} Pa > rim={outer:.0f} Pa"))
+
+    print(f"\n{sum(ok)}/{len(ok)} spheroid checks passed")
+    return all(ok)
+
+
 def main():
     p = default_params()
     free = scm.simulate(p, confined=False)
@@ -73,4 +124,6 @@ def main():
 
 if __name__ == "__main__":
     import sys
-    sys.exit(0 if main() else 1)
+    single_ok = main()
+    spheroid_ok = validate_spheroid()
+    sys.exit(0 if (single_ok and spheroid_ok) else 1)

@@ -115,18 +115,31 @@ def solve_state(n_n: float, sigma_g: float, p: Params) -> dict:
         dPi_total = dPi_ip + Pi_n
         return dP - dPi_total
 
-    # bracket the root: grow upper bound until imbalance changes sign
-    r_lo = p.r0
-    f_lo = imbalance(r_lo)
-    r_hi = p.r0
-    f_hi = f_lo
-    for _ in range(200):
-        r_hi *= 1.05
-        f_hi = imbalance(r_hi)
-        if f_lo * f_hi < 0:
-            break
-    else:
-        raise RuntimeError("could not bracket quasi-static volume root")
+    # bracket the root. imbalance(r) is monotonically increasing (dP rises with
+    # r, dPi falls with r), so the root is unique. Free cells sit above r0, but
+    # strong external confinement can compress the equilibrium radius below r0,
+    # so we expand the bracket in whichever direction is needed.
+    f0 = imbalance(p.r0)
+    if f0 < 0.0:                      # root above r0 (typical: cell is stretched)
+        r_lo, f_lo = p.r0, f0
+        r_hi = p.r0
+        for _ in range(400):
+            r_hi *= 1.05
+            if f_lo * imbalance(r_hi) < 0:
+                break
+        else:
+            raise RuntimeError("could not bracket quasi-static volume root (up)")
+    else:                            # root below r0 (cell compressed by sigma_g)
+        r_hi, f_hi = p.r0, f0
+        r_lo = p.r0
+        for _ in range(400):
+            r_lo *= 0.97
+            if f_hi * imbalance(r_lo) < 0:
+                break
+            if r_lo < 1e-2 * p.r0:
+                break
+        else:
+            raise RuntimeError("could not bracket quasi-static volume root (down)")
 
     r = brentq(imbalance, r_lo, r_hi, xtol=1e-10, rtol=1e-12)
 

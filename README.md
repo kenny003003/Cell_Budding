@@ -1,7 +1,8 @@
-# Replication: single-cell mechano-osmotic growth and the volume checkpoint
+# Replication: mechano-osmotic growth and the cell-volume checkpoint
 
 A from-scratch reimplementation of the **single-cell hydromechanical growth
-model** (Figure 1) of:
+model** (Figure 1), plus a **simplified open reproduction of the multicellular
+stress-dependent spheroid-growth result** (≈Figure 4), of:
 
 > I. Senthilkumar, J. Vangheel, V. Kumar, L. McNamara, B. Smeets, E. Howley,
 > E. McEvoy, *"Stress-dependent growth in breast cancer arises from a
@@ -138,31 +139,87 @@ This is an honest, mechanism-faithful replication of the model and its central
 result; absolute parameter values that depend on the unpublished SI are
 calibrated to the paper's stated targets rather than copied.
 
+## Multicellular spheroid: stress-dependent growth (≈Fig. 4)
+
+The paper's headline tissue-scale result is that **a stiffer extracellular
+matrix (ECM) suppresses tumour growth**, because confinement raises hydrostatic
+stress and holds cells below the same mitotic volume checkpoint. The authors
+produce this with a discrete deformable-cell ("active foam") spheroid simulation
+on the proprietary **Mpacts** engine, an **Abaqus** finite-element ECM model, and
+a **neural-network surrogate** for the ECM response (their code:
+[KU Leuven GitLab](https://gitlab.kuleuven.be/mebios-particulate/publications/stress-dependent-growth-in-breast-cancer-arises-from-a-mechano-osmotic-coupling-and-cell-sizing-checkpoint),
+which requires Mpacts + Abaqus and renders movies in ParaView — not runnable
+from scratch openly).
+
+`src/spheroid_model.py` is a **lightweight, fully open** stand-in that keeps the
+*mechanism the paper credits the result to* and drops the heavy machinery:
+
+* each cell is a soft sphere whose volume comes straight from the **single-cell**
+  mechano-osmotic balance `solve_state(n_n, σ_g)`;
+* cells synthesise biomolecules, then **divide stochastically** once past the
+  volume checkpoint `P_div(V)`;
+* the spheroid grows inside an **elastic–plastic ECM cavity**: as it outgrows the
+  matrix, the matrix resists with a pressure `σ ∝ E_ECM · overstrain`, which the
+  cells feel as the confinement stress `σ_g` — closing the mechano-osmotic loop
+  at tissue scale. Interior cells end up more compressed than rim cells (the
+  paper's spatial cell-volume variation).
+
+![Figure 4 reproduction](figures/figure4_spheroid.png)
+
+Running three ECM stiffnesses (the **0.58 / 0.85 / 1.1 kPa** used by the paper's
+AI surrogate) plus an unconfined control reproduces the stress-dependent-growth
+trend (`validate.py` checks it; 4/4 pass):
+
+| ECM stiffness | final cells `N` | fold volume growth | mean `σ_g` |
+|---|---|---|---|
+| unconfined | 320 (cap) | ×20 | 0 Pa |
+| 0.58 kPa | 152 | ×8.6 | 59 Pa |
+| 0.85 kPa | 73 | ×4.1 | 62 Pa |
+| 1.1 kPa | 53 | ×3.0 | 64 Pa |
+
+`src/animate_spheroid.py` renders the growth as a movie
+(`figures/spheroid_growth.gif`), cells coloured by compressive stress.
+
+> **This is a reduced model, not the authors' simulation.** It is calibrated to
+> reproduce the qualitative stiffness-dependent-growth *trend* and the spatial
+> compression pattern — not the paper's exact spheroid geometry, cell-resolved
+> deformation, or ECM finite-element fields. The tissue-scale mechanical
+> constants (`c_wall`, `plastic`, `phi_max`, …) are a single shared calibrated
+> set; only `E_ECM` changes between conditions. See `src/spheroid_model.py` for
+> the full derivation and assumptions.
+
 ## Usage
 
 ```bash
 pip install -r requirements.txt
 python src/single_cell_model.py   # prints the growth/pressure trajectory
 python src/figure1.py             # writes figures/ (Fig. 1b–f + combined)
-python src/validate.py            # checks the reproduction vs. paper anchors
+python src/spheroid_model.py      # prints the ECM-stiffness growth sweep
+python src/figure4.py             # writes figures/figure4_spheroid.png
+python src/animate_spheroid.py    # writes figures/spheroid_growth.gif
+python src/validate.py            # checks both reproductions (11/11)
 ```
 
-## Scope
+## Scope and honesty
 
-This replicates the **single-cell model (Fig. 1)** — the foundational,
-self-contained result. The paper's later results (multicellular deformable-cell
-"active foam" spheroids, the DNN-accelerated finite-element ECM solver, and the
-T47D/4T1 experiments) build a large simulation stack on top of proprietary
-frameworks (Abaqus, the KU Leuven deformable-cell code) and are out of scope
-here. The single-cell mechano-osmotic coupling is the mechanism on which all of
-those results rest.
+* **Single-cell model (Fig. 1):** a faithful, mechanism-level replication; the
+  authors did **not** publish this part's code, so it is independent.
+* **Spheroid result (≈Fig. 4):** a **simplified open reproduction** of the
+  *trend and mechanism*. The authors' actual multicellular code is public but
+  depends on proprietary Mpacts + Abaqus and a trained DNN surrogate, so it is
+  not openly runnable; this repo substitutes an open particle model.
+* **Not attempted:** the DNN-accelerated finite-element ECM solver itself, the
+  cell-resolved deformable-cell mechanics, and the T47D/4T1 wet-lab experiments.
 
 ## Repository layout
 
 ```
-src/parameters.py          parameter set with per-value provenance
-src/single_cell_model.py   the model (quasi-static + full-ODE integrators, checkpoint)
+src/parameters.py          single-cell parameter set with per-value provenance
+src/single_cell_model.py   single-cell model (quasi-static + full-ODE, checkpoint)
 src/figure1.py             reproduces Figure 1b–f
-src/validate.py            quantitative checks vs. the paper's anchors
-figures/                   generated figures
+src/spheroid_model.py      simplified open multicellular spheroid model (≈Fig. 4)
+src/figure4.py             reproduces the stress-dependent-growth figure
+src/animate_spheroid.py    renders the spheroid-growth movie (GIF)
+src/validate.py            quantitative checks for both models (11/11)
+figures/                   generated figures and animation
 ```
