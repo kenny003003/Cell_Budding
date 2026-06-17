@@ -136,3 +136,26 @@ class Params:
 
 def default_params() -> Params:
     return Params()
+
+
+def scaled_params(p: "Params", s: float) -> "Params":
+    """Return a geometrically down-scaled cell (linear scale factor s).
+
+    Lengths scale by s and osmolyte amounts by s**3, which leaves every *pressure*
+    (osmotic Pi=nRT/V, cortical sigma, hydrostatic dP=sigma_g+2h*sigma/r) and every
+    ratio (V/V_div) invariant. So the cell behaves identically -- same fold-growth,
+    same confinement-arrest threshold -- but is physically smaller. Used only by
+    the illustrative multicellular models so a spheroid can be built from many
+    small cells (smooth sphere) without touching the validated single-cell
+    parameters.
+    """
+    from dataclasses import replace
+    return replace(
+        p,
+        r0=s * p.r0,
+        h=s * p.h,
+        n_n0=s ** 3 * p.n_n0,
+        n_sat=s ** 3 * p.n_sat,
+        V_div=s ** 3 * p.V_div,
+        beta=s ** 3 * p.beta,
+    )

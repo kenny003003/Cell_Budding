@@ -27,14 +27,15 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from parameters import Params, default_params
+from parameters import Params, default_params, scaled_params
 import single_cell_model as scm
 from spheroid_model import VolumeTable
 
 
 @dataclass
 class BlebParams:
-    n_seed: int = 60            # initial cells
+    n_seed: int = 220           # initial cells (many small cells -> smooth sphere)
+    cell_scale: float = 0.5     # shrink cells (scale-invariant; smoother-looking sphere)
     # confinement (force-based ECM boundary) --------------------------------
     E_ecm: float = 1100.0       # matrix stiffness [Pa]
     c_wall: float = 1.0         # confinement stress = c_wall * E_ecm * bulk overpacking
@@ -51,15 +52,22 @@ class BlebParams:
     relax_frac: float = 0.30    # fraction of overlap/penetration resolved per sweep
     k_coh: float = 0.08         # cohesion (surface tension) relative to repulsion
     coh_range: float = 2.5      # cohesive range beyond contact [um]
-    sub_steps: int = 12         # mechanical relaxation sweeps per growth step
+    sub_steps: int = 9          # mechanical relaxation sweeps per growth step
     # growth ----------------------------------------------------------------
     dt: float = 2.0             # synthesis timestep [h]
-    t_max: float = 200.0
+    t_max: float = 150.0
     tau_div: float = 2.5
     checkpoint_alpha: float = 30.0   # sharper tissue-scale sizing checkpoint
-    n_max: int = 300
+    n_max: int = 650
     seed: int = 1
     cell: Params = field(default_factory=default_params)
+
+    def __post_init__(self):
+        # shrink the cell (scale-invariant) so the spheroid is built from many
+        # small cells; coh_range is a length, so it scales too.
+        if self.cell_scale != 1.0:
+            self.cell = scaled_params(self.cell, self.cell_scale)
+            self.coh_range *= self.cell_scale
 
 
 class BlebSpheroid:
