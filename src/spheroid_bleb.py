@@ -12,8 +12,10 @@ We then cut a **local defect**: an angular patch of the matrix where the confini
 stiffness drops to near zero (a hole / soft spot in the ECM). The internal
 hydrostatic pressure is now unbalanced there, so cells are squeezed out through
 the defect and -- because the low stress there lets them pass the volume
-checkpoint while confined cells arrest -- they keep proliferating, extending a
-bud. Cohesion keeps the bud a connected protrusion rather than scattered cells.
+checkpoint while confined cells arrest -- they keep proliferating. The escaped
+cells fill their own growing spherical cavity, tangent to the mother at the hole,
+so the bleb rounds up into a free daughter spheroid bulging into open space
+(a confined mother spheroid with a proliferating, unconfined bud).
 
 This reuses the single-cell mechano-osmotic volume law (L1) for cell size/growth;
 only L2/L3 are replaced by the explicit force model.
@@ -41,24 +43,24 @@ class BlebParams:
     c_wall: float = 1.0         # confinement stress = c_wall * E_ecm * bulk overpacking
     sigma_cap: float = 320.0    # cap on confinement stress [Pa] (avoids runaway)
     phi_max: float = 0.64       # packing fraction (cavity capacity)
-    compress: float = 0.90      # cavity radius = compress * seeded packing radius
+    compress: float = 0.93      # cavity radius = compress * seeded packing radius
     # the local defect ------------------------------------------------------
     defect_dir: tuple = (1.0, 0.0, 0.0)   # direction of the weak patch
     defect_halfangle: float = 0.45         # cone half-angle [rad] (~26 deg, small hole)
     defect_depth: float = 1.0              # 1 = stiffness -> 0 at the patch centre
     defect_open_t: float = 16.0            # [h] open the defect after this time
-    div_bias: float = 1.6                  # outward bias of division axis (finger growth)
+    div_bias: float = 1.6                  # outward bias for confined cells (extrusion)
     # cell-cell mechanics ---------------------------------------------------
     relax_frac: float = 0.30    # fraction of overlap/penetration resolved per sweep
-    k_coh: float = 0.08         # cohesion (surface tension) relative to repulsion
+    k_coh: float = 0.15         # cohesion (surface tension) relative to repulsion
     coh_range: float = 2.5      # cohesive range beyond contact [um]
     sub_steps: int = 9          # mechanical relaxation sweeps per growth step
     # growth ----------------------------------------------------------------
     dt: float = 2.0             # synthesis timestep [h]
-    t_max: float = 150.0
-    tau_div: float = 2.5
+    t_max: float = 240.0
+    tau_div: float = 9.0        # mean delay to divide once past checkpoint [h]
     checkpoint_alpha: float = 30.0   # sharper tissue-scale sizing checkpoint
-    n_max: int = 650
+    n_max: int = 400
     seed: int = 1
     cell: Params = field(default_factory=default_params)
 
@@ -91,12 +93,16 @@ class BlebSpheroid:
         self.n_hat = np.array(bp.defect_dir, float)
         self.n_hat /= np.linalg.norm(self.n_hat)
         self.t = 0.0
+        self.cav_center = self.pos.mean(0).copy()
         self.R_cav = 1e6                      # no confinement while seeding
+        self.escaped = np.zeros(n0, bool)
         self._relax(40)
 
-        # cavity sized to the cells' volume at close packing, slightly
-        # pre-compressed -> the seeded bulk is already confined (arrested)
+        # fix the matrix cavity about the seeded bulk (a structure fixed in space,
+        # not following the cells); slightly pre-compressed so the bulk is confined
+        self.cav_center = self.pos.mean(0).copy()
         self.R_cav = bp.compress * scm.radius_from_volume(self.V.sum() / bp.phi_max)
+        self.escaped = np.zeros(self.pos.shape[0], bool)
         self.history = []
 
     # geometry -------------------------------------------------------------
@@ -118,12 +124,8 @@ class BlebSpheroid:
         return 1.0 - bp.defect_depth * t
 
     def _bulk_overpack(self):
-        """How over-packed the confined bulk is: total cell volume inside the
-        cavity vs the cavity's close-packing capacity. Stable scalar (does not
-        vanish as positions relax, unlike residual penetration)."""
-        c = self.pos.mean(0)
-        rho = np.linalg.norm(self.pos - c, axis=1)
-        V_in = self.V[rho < self.R_cav].sum()
+        """Over-packing of the *confined* bulk (cells still inside the cavity)."""
+        V_in = self.V[~self.escaped].sum()
         cap = self.bp.phi_max * 4.0 / 3.0 * np.pi * self.R_cav ** 3
         return max(0.0, V_in / cap - 1.0)
 
@@ -142,26 +144,46 @@ class BlebSpheroid:
             overlap = np.where(d < rs, rs - d, 0.0)                 # volume exclusion
             gap = d - rs
             coh = np.where((gap > 0) & (gap < bp.coh_range), gap, 0.0)  # cohesion
-            m = overlap - bp.k_coh * coh
+            # cohesion acts only within a tissue (bulk-bulk or bud-bud), not across
+            # them, so the bud rounds into its OWN spheroid instead of wetting the
+            # mother; bud and mother still exclude each other by repulsion.
+            same = self.escaped[:, None] == self.escaped[None, :]
+            m = overlap - bp.k_coh * coh * same
             disp = bp.relax_frac * (m[:, :, None] * hat).sum(axis=1)
 
-            # confining boundary: push cells back inside the cavity, EXCEPT in
-            # the (opened) defect cone where the wall is gone -> cells extrude.
-            c = self.pos.mean(0); rel = self.pos - c
+            rel = self.pos - self.cav_center
             rho = np.linalg.norm(rel, axis=1)
             u = np.divide(rel, rho[:, None], out=np.zeros_like(rel), where=rho[:, None] > 1e-9)
-            sfac = self._confine_stiffness(u)                       # 1 wall, 0 defect
-            pen = rho + self.r - self.R_cav
-            disp -= bp.relax_frac * np.where(pen > 0, pen, 0.0)[:, None] * sfac[:, None] * u
+            sfac_hole = self._confine_stiffness(u)                  # 1 wall, 0 hole
+            # matrix shell is a two-sided barrier with a hole: confined cells stay
+            # inside the cavity, escaped cells stay outside it (can't wrap back in)
+            # mother cavity: confine non-escaped cells (except at the hole)
+            pen_in = np.where((rho + self.r > self.R_cav) & (~self.escaped),
+                              rho + self.r - self.R_cav, 0.0) * sfac_hole
+            disp -= bp.relax_frac * pen_in[:, None] * u
+            # bud: escaped cells fill their OWN growing spherical cavity, tangent
+            # to the mother at the hole, so the bleb is a round spheroid bulging
+            # into open space (its radius and centre grow with the bud's volume).
+            if self.escaped.any():
+                R_bud = (self.escaped.sum() / bp.phi_max) ** (1.0 / 3.0) \
+                    * self.r[self.escaped].mean()
+                bud_center = self.cav_center + (self.R_cav + R_bud) * self.n_hat
+                relb = self.pos - bud_center
+                rhob = np.linalg.norm(relb, axis=1)
+                ub = np.divide(relb, rhob[:, None], out=np.zeros_like(relb),
+                               where=rhob[:, None] > 1e-9)
+                penb = np.where((rhob + self.r > R_bud) & self.escaped,
+                                rhob + self.r - R_bud, 0.0)
+                disp -= bp.relax_frac * penb[:, None] * ub
             self.pos = self.pos + disp
+            # a cell that has crossed the wall through the hole is now in open
+            # space and stays free thereafter
+            self.escaped |= np.linalg.norm(self.pos - self.cav_center, axis=1) > self.R_cav
 
-        # mean-field confinement stress (stable), removed inside the defect cone
-        c = self.pos.mean(0); rel = self.pos - c
-        rho = np.linalg.norm(rel, axis=1)
-        u = np.divide(rel, rho[:, None], out=np.zeros_like(rel), where=rho[:, None] > 1e-9)
-        sfac = self._confine_stiffness(u)
+        # stress: the confined bulk is pressurised; escaped cells (open space) are
+        # free (sigma_g = 0), so they grow, divide and round up into a spheroid.
         sigma_mean = min(bp.c_wall * bp.E_ecm * self._bulk_overpack(), bp.sigma_cap)
-        self.sigma_g = sigma_mean * sfac
+        self.sigma_g = np.where(self.escaped, 0.0, sigma_mean)
         self.V = self.tab.volume(self.n_n, self.sigma_g)
         self.r = scm.radius_from_volume(self.V)
 
@@ -177,28 +199,32 @@ class BlebSpheroid:
         idx = np.where((self.V >= p.V_div) & (self.rng.random(self.V.shape) < rate))[0]
         if idx.size == 0:
             return
-        new_pos, new_nn, keep = [], [], self.n_n.copy()
-        center = self.pos.mean(0)
+        new_pos, new_nn, new_esc, keep = [], [], [], self.n_n.copy()
         for i in idx:
             if self.pos.shape[0] + len(new_pos) >= bp.n_max:
                 break
-            # divide preferentially toward free space (radially outward): under
-            # confinement the daughter is pushed where resistance is least, so a
-            # cell extruding through the defect extends the bud as a finger.
-            rad = self.pos[i] - center
-            nr = np.linalg.norm(rad)
-            rad = rad / nr if nr > 1e-6 else self.rng.normal(size=3)
-            dvec = self.rng.normal(size=3)
-            axis = dvec / (np.linalg.norm(dvec) + 1e-12) + bp.div_bias * rad
+            if self.escaped[i]:
+                # in the bud's own cavity: divide isotropically -> fills a sphere
+                axis = self.rng.normal(size=3)
+            else:
+                # confined: bias the daughter toward free space (out the hole),
+                # which helps cells extrude through the defect
+                rad = self.pos[i] - self.cav_center
+                nr = np.linalg.norm(rad)
+                rad = rad / nr if nr > 1e-6 else self.rng.normal(size=3)
+                dvec = self.rng.normal(size=3); dvec /= np.linalg.norm(dvec) + 1e-12
+                axis = dvec + bp.div_bias * rad
             axis /= np.linalg.norm(axis) + 1e-12
             off = 0.5 * self.r[i] * axis
             self.pos[i] = self.pos[i] + off
             new_pos.append(self.pos[i] - 2 * off)
             keep[i] = self.n_n[i] / 2.0; new_nn.append(self.n_n[i] / 2.0)
+            new_esc.append(bool(self.escaped[i]))
         if new_pos:
             self.pos = np.vstack([self.pos, np.array(new_pos)])
             self.n_n = np.concatenate([keep, np.array(new_nn)])
             self.sigma_g = np.concatenate([self.sigma_g, np.zeros(len(new_pos))])
+            self.escaped = np.concatenate([self.escaped, np.array(new_esc, bool)])
             self.V = self.tab.volume(self.n_n, self.sigma_g)
             self.r = scm.radius_from_volume(self.V)
 
