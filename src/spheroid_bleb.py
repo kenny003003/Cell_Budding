@@ -43,13 +43,15 @@ class BlebParams:
     c_wall: float = 1.0         # confinement stress = c_wall * E_ecm * bulk overpacking
     sigma_cap: float = 320.0    # cap on confinement stress [Pa] (avoids runaway)
     phi_max: float = 0.64       # packing fraction (cavity capacity)
-    compress: float = 0.93      # cavity radius = compress * seeded packing radius
+    compress: float = 0.985     # cavity radius = compress * seeded packing radius
     # the local defect ------------------------------------------------------
     defect_dir: tuple = (1.0, 0.0, 0.0)   # direction of the weak patch
     defect_halfangle: float = 0.45         # cone half-angle [rad] (~26 deg, small hole)
     defect_depth: float = 1.0              # 1 = stiffness -> 0 at the patch centre
     defect_open_t: float = 16.0            # [h] open the defect after this time
     div_bias: float = 1.6                  # outward bias for confined cells (extrusion)
+    pinch_ratio: float = 1.9               # detach when R_bud > pinch_ratio * neck radius
+    detach_speed: float = 0.45             # drift of the detached daughter [um/h]
     # cell-cell mechanics ---------------------------------------------------
     relax_frac: float = 0.30    # fraction of overlap/penetration resolved per sweep
     k_coh: float = 0.15         # cohesion (surface tension) relative to repulsion
@@ -58,9 +60,9 @@ class BlebParams:
     # growth ----------------------------------------------------------------
     dt: float = 2.0             # synthesis timestep [h]
     t_max: float = 240.0
-    tau_div: float = 9.0        # mean delay to divide once past checkpoint [h]
+    tau_div: float = 14.0       # mean delay to divide once past checkpoint [h]
     checkpoint_alpha: float = 30.0   # sharper tissue-scale sizing checkpoint
-    n_max: int = 400
+    n_max: int = 600
     seed: int = 1
     cell: Params = field(default_factory=default_params)
 
@@ -103,6 +105,12 @@ class BlebSpheroid:
         self.cav_center = self.pos.mean(0).copy()
         self.R_cav = bp.compress * scm.radius_from_volume(self.V.sum() / bp.phi_max)
         self.escaped = np.zeros(self.pos.shape[0], bool)
+        # thin-neck pinch-off state
+        self.r_neck = self.R_cav * np.sin(bp.defect_halfangle)   # half-width of the hole
+        self.detached = False
+        self.detach_gap = 0.0          # extra separation of the daughter after pinch-off
+        self.detach_t = None
+        self.R_bud = 0.0
         self.history = []
 
     # geometry -------------------------------------------------------------
@@ -115,8 +123,8 @@ class BlebSpheroid:
         vector u: ~1 (intact wall) everywhere except inside the opened defect
         cone, where it drops sharply to ~0 (a hole in the matrix)."""
         bp = self.bp
-        if self.t < bp.defect_open_t:
-            return np.ones(u.shape[0])
+        if self.t < bp.defect_open_t or self.detached:
+            return np.ones(u.shape[0])     # intact wall (or healed after pinch-off)
         cosang = u @ self.n_hat
         c0 = np.cos(bp.defect_halfangle)
         edge = max(0.03, 0.4 * (1.0 - c0))            # edge width scales with cone size
@@ -167,7 +175,9 @@ class BlebSpheroid:
             if self.escaped.any():
                 R_bud = (self.escaped.sum() / bp.phi_max) ** (1.0 / 3.0) \
                     * self.r[self.escaped].mean()
-                bud_center = self.cav_center + (self.R_cav + R_bud) * self.n_hat
+                self.R_bud = R_bud
+                bud_center = self.cav_center \
+                    + (self.R_cav + R_bud + self.detach_gap) * self.n_hat
                 relb = self.pos - bud_center
                 rhob = np.linalg.norm(relb, axis=1)
                 ub = np.divide(relb, rhob[:, None], out=np.zeros_like(relb),
@@ -237,10 +247,21 @@ class BlebSpheroid:
             self.n_n = np.minimum(self.n_n + p.beta * bp.dt * 3600.0, p.n_sat)
             self._relax()
             self._divide()
+            # thin-neck pinch-off: once the bud outgrows the neck set by the
+            # defect, surface tension severs the connection. The daughter detaches
+            # and drifts off as a free-floating spheroid; the mother's defect heals
+            # (so no more cells are extruded and the mother stays confined).
+            if (not self.detached) and self.escaped.any() \
+                    and self.R_bud > bp.pinch_ratio * self.r_neck:
+                self.detached = True
+                self.detach_t = self.t
+            if self.detached:
+                self.detach_gap += bp.detach_speed * bp.dt
             if k % record_every == 0:
                 self.history.append(dict(t=self.t, pos=self.pos.copy(),
                                          r=self.r.copy(), sigma_g=self.sigma_g.copy(),
-                                         N=self.pos.shape[0]))
+                                         N=self.pos.shape[0], detached=self.detached,
+                                         escaped=self.escaped.copy()))
         return self.history
 
 
@@ -280,15 +301,19 @@ def main():
                                transOffset=ax.transData, cmap=cmap, norm=norm,
                                edgecolors="k", linewidths=0.25)
         ec.set_array(sg[order]); ax.add_collection(ec)
-        # mark the defect direction
-        ax.annotate("ECM defect", xy=(L * 0.92, 0), xytext=(L * 0.55, L * 0.8),
-                    fontsize=9, color="#1a7d1a",
-                    arrowprops=dict(arrowstyle="->", color="#1a7d1a", lw=1.5))
-        opened = "open" if f["t"] >= bp.defect_open_t else "intact"
+        if f.get("detached"):
+            state = "neck pinched off → daughter detached"
+        elif f["t"] >= bp.defect_open_t:
+            state = "defect open"
+            ax.annotate("ECM defect", xy=(L * 0.92, 0), xytext=(L * 0.55, L * 0.8),
+                        fontsize=9, color="#1a7d1a",
+                        arrowprops=dict(arrowstyle="->", color="#1a7d1a", lw=1.5))
+        else:
+            state = "defect intact"
         ax.set_xlim(-L, L); ax.set_ylim(-L, L); ax.set_aspect("equal")
         ax.set_xticks([]); ax.set_yticks([])
-        ax.set_title(f"ECM defect → bleb / budding\n"
-                     f"t={f['t']/24:.1f} d,  N={f['N']},  defect {opened}", fontsize=11)
+        ax.set_title(f"ECM defect → bud → thin-neck pinch-off\n"
+                     f"t={f['t']/24:.1f} d,  N={f['N']},  {state}", fontsize=11)
 
     anim = FuncAnimation(fig, draw, frames=len(s.history), blit=False)
     out = os.path.join(FIGDIR, "spheroid_bleb.gif")
