@@ -9,13 +9,22 @@ matrix boundary of stiffness ~E_ECM. Growth pressurises the spheroid against tha
 boundary.
 
 We then cut a **local defect**: an angular patch of the matrix where the confining
-stiffness drops to near zero (a hole / soft spot in the ECM). The internal
-hydrostatic pressure is now unbalanced there, so cells are squeezed out through
-the defect and -- because the low stress there lets them pass the volume
-checkpoint while confined cells arrest -- they keep proliferating. The escaped
-cells fill their own growing spherical cavity, tangent to the mother at the hole,
-so the bleb rounds up into a free daughter spheroid bulging into open space
-(a confined mother spheroid with a proliferating, unconfined bud).
+stiffness drops to near zero (a hole / soft spot in the ECM). Everything after
+that is emergent from forces -- nothing about budding or detachment is scripted:
+
+  * the confined mother is over-packed, so its hydrostatic pressure squeezes cells
+    out through the hole (and pushes the cells in the breach channel outward);
+  * cells that leave the cavity feel no confinement stress (set purely by
+    position), so they pass the volume checkpoint and proliferate;
+  * the tissue is held together by cohesion (a finite-range surface tension); the
+    ejection pressure stretches the thin neck, and where the stretch exceeds the
+    cohesive range the bonds simply vanish, so the neck severs ON ITS OWN
+    (a Rayleigh-Plateau-like pinch-off);
+  * it is self-limiting: once the mother has shed enough cells, its pressure
+    relaxes and ejection stops, leaving a detached daughter.
+
+A pressure-extruded daughter is elongated (teardrop), not a perfect sphere -- the
+honest signature of emergent, force-driven pinch-off rather than a scripted event.
 
 This reuses the single-cell mechano-osmotic volume law (L1) for cell size/growth;
 only L2/L3 are replaced by the explicit force model.
@@ -43,26 +52,25 @@ class BlebParams:
     c_wall: float = 1.0         # confinement stress = c_wall * E_ecm * bulk overpacking
     sigma_cap: float = 320.0    # cap on confinement stress [Pa] (avoids runaway)
     phi_max: float = 0.64       # packing fraction (cavity capacity)
-    compress: float = 0.985     # cavity radius = compress * seeded packing radius
+    compress: float = 0.92      # cavity radius = compress * seeded packing radius
     # the local defect ------------------------------------------------------
     defect_dir: tuple = (1.0, 0.0, 0.0)   # direction of the weak patch
-    defect_halfangle: float = 0.45         # cone half-angle [rad] (~26 deg, small hole)
+    defect_halfangle: float = 0.34         # cone half-angle [rad] (~19 deg, narrow neck)
     defect_depth: float = 1.0              # 1 = stiffness -> 0 at the patch centre
     defect_open_t: float = 16.0            # [h] open the defect after this time
-    div_bias: float = 1.6                  # outward bias for confined cells (extrusion)
-    pinch_ratio: float = 1.9               # detach when R_bud > pinch_ratio * neck radius
-    detach_speed: float = 0.45             # drift of the detached daughter [um/h]
+    eject_coef: float = 1.6                # pressure-driven ejection of extruded cells
+    eject_band: float = 10.0               # ejection acts only within this band past the wall [um]
     # cell-cell mechanics ---------------------------------------------------
     relax_frac: float = 0.30    # fraction of overlap/penetration resolved per sweep
-    k_coh: float = 0.15         # cohesion (surface tension) relative to repulsion
+    k_coh: float = 0.25         # cohesion (surface tension) relative to repulsion
     coh_range: float = 2.5      # cohesive range beyond contact [um]
     sub_steps: int = 9          # mechanical relaxation sweeps per growth step
     # growth ----------------------------------------------------------------
     dt: float = 2.0             # synthesis timestep [h]
     t_max: float = 240.0
-    tau_div: float = 14.0       # mean delay to divide once past checkpoint [h]
+    tau_div: float = 16.0       # mean delay to divide once past checkpoint [h]
     checkpoint_alpha: float = 30.0   # sharper tissue-scale sizing checkpoint
-    n_max: int = 600
+    n_max: int = 420
     seed: int = 1
     cell: Params = field(default_factory=default_params)
 
@@ -104,13 +112,6 @@ class BlebSpheroid:
         # not following the cells); slightly pre-compressed so the bulk is confined
         self.cav_center = self.pos.mean(0).copy()
         self.R_cav = bp.compress * scm.radius_from_volume(self.V.sum() / bp.phi_max)
-        self.escaped = np.zeros(self.pos.shape[0], bool)
-        # thin-neck pinch-off state
-        self.r_neck = self.R_cav * np.sin(bp.defect_halfangle)   # half-width of the hole
-        self.detached = False
-        self.detach_gap = 0.0          # extra separation of the daughter after pinch-off
-        self.detach_t = None
-        self.R_bud = 0.0
         self.history = []
 
     # geometry -------------------------------------------------------------
@@ -123,8 +124,8 @@ class BlebSpheroid:
         vector u: ~1 (intact wall) everywhere except inside the opened defect
         cone, where it drops sharply to ~0 (a hole in the matrix)."""
         bp = self.bp
-        if self.t < bp.defect_open_t or self.detached:
-            return np.ones(u.shape[0])     # intact wall (or healed after pinch-off)
+        if self.t < bp.defect_open_t:
+            return np.ones(u.shape[0])
         cosang = u @ self.n_hat
         c0 = np.cos(bp.defect_halfangle)
         edge = max(0.03, 0.4 * (1.0 - c0))            # edge width scales with cone size
@@ -132,17 +133,24 @@ class BlebSpheroid:
         return 1.0 - bp.defect_depth * t
 
     def _bulk_overpack(self):
-        """Over-packing of the *confined* bulk (cells still inside the cavity)."""
-        V_in = self.V[~self.escaped].sum()
+        """Over-packing of the cells still inside the matrix cavity."""
+        rho = np.linalg.norm(self.pos - self.cav_center, axis=1)
+        V_in = self.V[rho < self.R_cav].sum()
         cap = self.bp.phi_max * 4.0 / 3.0 * np.pi * self.R_cav ** 3
         return max(0.0, V_in / cap - 1.0)
 
-    # mechanical relaxation: geometry-based MOTION (stable, unit-free), with a
-    # separate mean-field (Pa) confinement STRESS that is switched off inside
-    # the defect cone so cells there can grow and be extruded -----------------
+    # Purely physical mechanics: one tissue with cell-cell repulsion (volume
+    # exclusion) + cohesion (surface tension), inside a two-sided elastic ECM
+    # shell that has a hole. Nothing about budding or pinch-off is scripted --
+    # cells extrude through the hole under pressure, the escaped mass rounds up
+    # by its own surface tension, and the thin neck breaks on its own (a
+    # Rayleigh-Plateau surface-tension instability) once extrusion subsides.
     def _relax(self, n=None):
         bp = self.bp
         n = bp.sub_steps if n is None else n
+        # mother's hydrostatic (over-packing) pressure -- the physical driver that
+        # ejects extruded cells outward through the hole and stretches the neck.
+        sigma_mean = min(bp.c_wall * bp.E_ecm * self._bulk_overpack(), bp.sigma_cap)
         for _ in range(n):
             diff = self.pos[:, None, :] - self.pos[None, :, :]
             d = np.linalg.norm(diff, axis=2); np.fill_diagonal(d, np.inf)
@@ -151,49 +159,43 @@ class BlebSpheroid:
                             where=d[:, :, None] < np.inf)
             overlap = np.where(d < rs, rs - d, 0.0)                 # volume exclusion
             gap = d - rs
-            coh = np.where((gap > 0) & (gap < bp.coh_range), gap, 0.0)  # cohesion
-            # cohesion acts only within a tissue (bulk-bulk or bud-bud), not across
-            # them, so the bud rounds into its OWN spheroid instead of wetting the
-            # mother; bud and mother still exclude each other by repulsion.
-            same = self.escaped[:, None] == self.escaped[None, :]
-            m = overlap - bp.k_coh * coh * same
+            coh = np.where((gap > 0) & (gap < bp.coh_range), gap, 0.0)  # surface tension
+            m = overlap - bp.k_coh * coh                           # one cohesive tissue
             disp = bp.relax_frac * (m[:, :, None] * hat).sum(axis=1)
 
+            # two-sided ECM shell at R_cav with a hole: a cell straddling the wall
+            # is pushed to whichever side its centre is on, EXCEPT at the hole,
+            # where it can pass through. Outside the hole the wall is impermeable
+            # both ways, so the mother stays in and the bud stays out.
             rel = self.pos - self.cav_center
             rho = np.linalg.norm(rel, axis=1)
             u = np.divide(rel, rho[:, None], out=np.zeros_like(rel), where=rho[:, None] > 1e-9)
-            sfac_hole = self._confine_stiffness(u)                  # 1 wall, 0 hole
-            # matrix shell is a two-sided barrier with a hole: confined cells stay
-            # inside the cavity, escaped cells stay outside it (can't wrap back in)
-            # mother cavity: confine non-escaped cells (except at the hole)
-            pen_in = np.where((rho + self.r > self.R_cav) & (~self.escaped),
-                              rho + self.r - self.R_cav, 0.0) * sfac_hole
-            disp -= bp.relax_frac * pen_in[:, None] * u
-            # bud: escaped cells fill their OWN growing spherical cavity, tangent
-            # to the mother at the hole, so the bleb is a round spheroid bulging
-            # into open space (its radius and centre grow with the bud's volume).
-            if self.escaped.any():
-                R_bud = (self.escaped.sum() / bp.phi_max) ** (1.0 / 3.0) \
-                    * self.r[self.escaped].mean()
-                self.R_bud = R_bud
-                bud_center = self.cav_center \
-                    + (self.R_cav + R_bud + self.detach_gap) * self.n_hat
-                relb = self.pos - bud_center
-                rhob = np.linalg.norm(relb, axis=1)
-                ub = np.divide(relb, rhob[:, None], out=np.zeros_like(relb),
-                               where=rhob[:, None] > 1e-9)
-                penb = np.where((rhob + self.r > R_bud) & self.escaped,
-                                rhob + self.r - R_bud, 0.0)
-                disp -= bp.relax_frac * penb[:, None] * ub
+            sfac = self._confine_stiffness(u)                      # 1 wall, 0 hole
+            inside = rho < self.R_cav
+            pen_in = np.where(inside & (rho + self.r > self.R_cav),
+                              rho + self.r - self.R_cav, 0.0)        # inside cell pokes out
+            pen_out = np.where((~inside) & (rho - self.r < self.R_cav),
+                               self.R_cav - (rho - self.r), 0.0)     # outside cell pokes in
+            disp += bp.relax_frac * ((pen_out - pen_in) * sfac)[:, None] * u
+            # hydrostatic ejection: the pressurised mother pushes cells that are in
+            # the hole channel (just outside the wall) outward along the defect
+            # axis (force scales with the mother's pressure, and acts only locally
+            # at the breach, not on the distant daughter). This stretches the neck;
+            # where the stretch exceeds the cohesive range the surface-tension bond
+            # simply vanishes, so the neck severs on its own. It is self-limiting:
+            # once the mother has shed enough cells its pressure relaxes and the
+            # ejection stops, leaving the daughter to round up by cohesion.
+            channel = (~inside) & (rho < self.R_cav + bp.eject_band)
+            eject = bp.eject_coef * (sigma_mean / bp.sigma_cap)
+            disp += bp.relax_frac * eject * channel[:, None] * self.n_hat
             self.pos = self.pos + disp
-            # a cell that has crossed the wall through the hole is now in open
-            # space and stays free thereafter
-            self.escaped |= np.linalg.norm(self.pos - self.cav_center, axis=1) > self.R_cav
 
-        # stress: the confined bulk is pressurised; escaped cells (open space) are
-        # free (sigma_g = 0), so they grow, divide and round up into a spheroid.
-        sigma_mean = min(bp.c_wall * bp.E_ecm * self._bulk_overpack(), bp.sigma_cap)
-        self.sigma_g = np.where(self.escaped, 0.0, sigma_mean)
+        # confinement stress is set by POSITION: cells inside the matrix cavity
+        # feel the hydrostatic confinement pressure; cells that have extruded into
+        # open space (rho > R_cav) feel none and so grow and divide freely.
+        rho = np.linalg.norm(self.pos - self.cav_center, axis=1)
+        inside_frac = np.clip((self.R_cav - rho) / (2.0 * self.r) + 0.5, 0.0, 1.0)
+        self.sigma_g = sigma_mean * inside_frac
         self.V = self.tab.volume(self.n_n, self.sigma_g)
         self.r = scm.radius_from_volume(self.V)
 
@@ -209,34 +211,36 @@ class BlebSpheroid:
         idx = np.where((self.V >= p.V_div) & (self.rng.random(self.V.shape) < rate))[0]
         if idx.size == 0:
             return
-        new_pos, new_nn, new_esc, keep = [], [], [], self.n_n.copy()
+        new_pos, new_nn, keep = [], [], self.n_n.copy()
         for i in idx:
             if self.pos.shape[0] + len(new_pos) >= bp.n_max:
                 break
-            if self.escaped[i]:
-                # in the bud's own cavity: divide isotropically -> fills a sphere
-                axis = self.rng.normal(size=3)
-            else:
-                # confined: bias the daughter toward free space (out the hole),
-                # which helps cells extrude through the defect
-                rad = self.pos[i] - self.cav_center
-                nr = np.linalg.norm(rad)
-                rad = rad / nr if nr > 1e-6 else self.rng.normal(size=3)
-                dvec = self.rng.normal(size=3); dvec /= np.linalg.norm(dvec) + 1e-12
-                axis = dvec + bp.div_bias * rad
+            axis = self.rng.normal(size=3)           # isotropic placement (no scripting)
             axis /= np.linalg.norm(axis) + 1e-12
             off = 0.5 * self.r[i] * axis
             self.pos[i] = self.pos[i] + off
             new_pos.append(self.pos[i] - 2 * off)
             keep[i] = self.n_n[i] / 2.0; new_nn.append(self.n_n[i] / 2.0)
-            new_esc.append(bool(self.escaped[i]))
         if new_pos:
             self.pos = np.vstack([self.pos, np.array(new_pos)])
             self.n_n = np.concatenate([keep, np.array(new_nn)])
             self.sigma_g = np.concatenate([self.sigma_g, np.zeros(len(new_pos))])
-            self.escaped = np.concatenate([self.escaped, np.array(new_esc, bool)])
             self.V = self.tab.volume(self.n_n, self.sigma_g)
             self.r = scm.radius_from_volume(self.V)
+
+    def _measure_detachment(self):
+        """Diagnostic only (does not affect the physics): is the extruded mass
+        (cells outside the cavity) separated from the mother (cells inside) by a
+        gap wider than the cohesive reach, i.e. has the neck broken?"""
+        rho = np.linalg.norm(self.pos - self.cav_center, axis=1)
+        out = rho > self.R_cav
+        budding = bool(out.any())
+        detached = False
+        if out.any() and (~out).any():
+            dd = np.linalg.norm(self.pos[out][:, None, :] - self.pos[~out][None, :, :], axis=2)
+            gap = (dd - (self.r[out][:, None] + self.r[~out][None, :])).min()
+            detached = gap > self.bp.coh_range
+        return budding, detached
 
     # main loop ------------------------------------------------------------
     def run(self, record_every=1):
@@ -247,21 +251,12 @@ class BlebSpheroid:
             self.n_n = np.minimum(self.n_n + p.beta * bp.dt * 3600.0, p.n_sat)
             self._relax()
             self._divide()
-            # thin-neck pinch-off: once the bud outgrows the neck set by the
-            # defect, surface tension severs the connection. The daughter detaches
-            # and drifts off as a free-floating spheroid; the mother's defect heals
-            # (so no more cells are extruded and the mother stays confined).
-            if (not self.detached) and self.escaped.any() \
-                    and self.R_bud > bp.pinch_ratio * self.r_neck:
-                self.detached = True
-                self.detach_t = self.t
-            if self.detached:
-                self.detach_gap += bp.detach_speed * bp.dt
             if k % record_every == 0:
+                budding, detached = self._measure_detachment()
                 self.history.append(dict(t=self.t, pos=self.pos.copy(),
                                          r=self.r.copy(), sigma_g=self.sigma_g.copy(),
-                                         N=self.pos.shape[0], detached=self.detached,
-                                         escaped=self.escaped.copy()))
+                                         N=self.pos.shape[0], budding=budding,
+                                         detached=detached))
         return self.history
 
 
@@ -303,11 +298,13 @@ def main():
         ec.set_array(sg[order]); ax.add_collection(ec)
         if f.get("detached"):
             state = "neck pinched off → daughter detached"
-        elif f["t"] >= bp.defect_open_t:
-            state = "defect open"
+        elif f.get("budding"):
+            state = "budding through the defect"
             ax.annotate("ECM defect", xy=(L * 0.92, 0), xytext=(L * 0.55, L * 0.8),
                         fontsize=9, color="#1a7d1a",
                         arrowprops=dict(arrowstyle="->", color="#1a7d1a", lw=1.5))
+        elif f["t"] >= bp.defect_open_t:
+            state = "defect open"
         else:
             state = "defect intact"
         ax.set_xlim(-L, L); ax.set_ylim(-L, L); ax.set_aspect("equal")
