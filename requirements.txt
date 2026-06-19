@@ -1,0 +1,4 @@
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.6
+pillow>=9.0          # GIF writer for animate_spheroid.py
