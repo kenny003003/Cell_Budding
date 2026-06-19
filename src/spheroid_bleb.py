@@ -38,36 +38,36 @@ from spheroid_model import VolumeTable
 
 @dataclass
 class BlebParams:
-    n_seed: int = 220           # initial cells (many small cells -> smooth sphere)
+    n_seed: int = 480           # initial cells -> a large mother spheroid
     cell_scale: float = 0.5     # shrink cells (scale-invariant; smoother sphere)
     # confinement (ECM cavity) ----------------------------------------------
     E_ecm: float = 1100.0       # matrix stiffness [Pa]
     c_wall: float = 1.0         # confinement stress = c_wall * E_ecm * bulk overpacking
     sigma_cap: float = 320.0    # cap on confinement stress [Pa]
     phi_max: float = 0.64       # packing fraction (cavity capacity)
-    compress: float = 0.93      # cavity radius = compress * seeded packing radius
+    compress: float = 0.98      # cavity radius = compress * seeded packing radius
     # the local defect ------------------------------------------------------
     defect_dir: tuple = (1.0, 0.0, 0.0)   # direction of the weak patch
-    defect_halfangle: float = 0.45         # cone half-angle [rad] -> sets the hole size
+    defect_halfangle: float = 0.22         # cone half-angle [rad] -> thin neck (early pinch)
     defect_depth: float = 1.0
     defect_open_t: float = 16.0            # [h] open the defect after this time
     div_bias: float = 1.6                  # outward bias for confined cells (extrusion)
     # surface-tension neck failure (the physical detachment trigger) --------
     gamma: float = 1.0          # surface tension (relative); scales neck Laplace pressure
-    neck_rate: float = 0.9      # capillary thinning rate [um^2/h]
+    neck_rate: float = 3.0      # capillary thinning rate [um^2/h]
     a_min: float = 0.6          # neck collapses (detaches) below this radius [um]
     detach_eject: float = 0.6   # post-detach ejection speed per unit pressure [um/h]
     # cell-cell mechanics ---------------------------------------------------
     relax_frac: float = 0.30
     k_coh: float = 0.15         # cohesion (also sets surface tension scale)
     coh_range: float = 2.5      # cohesive range beyond contact [um]
-    sub_steps: int = 8
+    sub_steps: int = 7
     # growth ----------------------------------------------------------------
     dt: float = 2.0
-    t_max: float = 240.0
+    t_max: float = 140.0
     tau_div: float = 12.0
     checkpoint_alpha: float = 30.0
-    n_max: int = 460
+    n_max: int = 580
     seed: int = 1
     cell: Params = field(default_factory=default_params)
 
